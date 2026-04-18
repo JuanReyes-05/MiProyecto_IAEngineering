@@ -1,0 +1,25 @@
+PREGUNTAS FRECUENTES — SOPORTE TÉCNICO
+
+P: ¿Cómo puedo restablecer mi contraseña?
+R: Ingresa al portal de autoservicio en https://portal.empresa.com/password y sigue las instrucciones. Necesitarás acceso a tu correo o teléfono registrado para verificar tu identidad. Si no tienes acceso a ninguno de los dos, contacta a soporte Nivel 1 con tu identificación de empleado.
+
+P: ¿Cómo solicito acceso a un nuevo sistema o aplicación?
+R: Envía un correo a accesos@empresa.com con la siguiente información: nombre completo, número de empleado, sistema solicitado y aprobación de tu jefe directo. El tiempo de aprovisionamiento es de 2 a 3 días hábiles.
+
+P: ¿Qué hago si mi equipo de cómputo está muy lento?
+R: Primero reinicia el equipo. Si el problema persiste, verifica que no tengas demasiadas aplicaciones abiertas. Como último recurso, genera un ticket de soporte y un técnico revisará tu equipo de forma remota o presencial.
+
+P: ¿Cómo conecto mi laptop a la red WiFi corporativa?
+R: Selecciona la red "EMPRESA-CORP" en la lista de redes WiFi. Ingresa tu usuario (sin @empresa.com) y tu contraseña corporativa. Si te pide un certificado, acéptalo. La red "EMPRESA-GUEST" es solo para visitantes y no tiene acceso a recursos internos.
+
+P: ¿Puedo instalar software por mi cuenta?
+R: No. Por políticas de seguridad, solo el equipo de TI puede instalar software autorizado. Para solicitar la instalación de un programa, genera un ticket indicando el nombre del software, la versión y el motivo de uso. El equipo evaluará si está en la lista de software aprobado.
+
+P: ¿Cómo reporto un incidente de seguridad?
+R: Si sospechas que tu cuenta fue comprometida, tu equipo tiene un virus o encontraste un correo de phishing, reporta inmediatamente a seguridad@empresa.com o llama a la extensión 5555. No reenvíes correos sospechosos a otros compañeros.
+
+P: ¿Cuál es el proceso para solicitar equipo nuevo?
+R: El reemplazo de equipo se realiza cada 3 años. Si tu equipo presenta fallas antes de ese periodo, genera un ticket de soporte. El equipo de TI evaluará si procede una reparación o un reemplazo anticipado. La aprobación de equipos nuevos requiere autorización del gerente de área.
+
+P: ¿Cómo funciona el soporte remoto?
+R: Un técnico de soporte puede conectarse a tu equipo de forma remota usando la herramienta TeamViewer corporativo. Tú deberás aceptar la conexión y podrás ver todo lo que el técnico hace en tu pantalla. Las sesiones quedan registradas por seguridad.
