@@ -1,69 +1,49 @@
 """
-rag_chain.py — Cadena RAG: el cerebro del sistema
+rag_chain.py — Cadena RAG: el cerebro del sistema.
 
-Qué hace este archivo:
-1. Recibe la pregunta del usuario
-2. La convierte en vector y busca los fragmentos más similares en ChromaDB
-3. Arma un prompt con la pregunta + el contexto recuperado
-4. Se lo envía al LLM (GPT-4o-mini)
-5. Devuelve la respuesta con metadata (fuentes, score de confianza, etc.)
-
-Analogía: es la recepcionista inteligente que busca en el archivador,
-lee las tarjetas relevantes y formula una respuesta coherente.
+Recibe la pregunta, recupera fragmentos relevantes de ChromaDB, arma el prompt
+con el contexto y llama al LLM. Devuelve una respuesta estructurada con
+fuentes, score de confianza y señal de derivación.
 """
-
-from typing import Optional
-from dataclasses import dataclass, field
-
-from dotenv import load_dotenv
-from langchain_openai import ChatOpenAI
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_chroma import Chroma
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import RunnablePassthrough
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.documents import Document
-import os
 import logging
+from dataclasses import dataclass, field
+from typing import Optional
 
-load_dotenv()
-# ─── Dataclasses para respuestas tipadas ─────────────────────────────────────
+from langchain_chroma import Chroma
+from langchain_core.documents import Document
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_openai import ChatOpenAI
+
+from config import Settings, get_settings
+
+logger = logging.getLogger(__name__)
+
+
+# ─── Dataclasses de dominio ──────────────────────────────────────────────────
 
 @dataclass
 class Fuente:
-    """Representa un fragmento de documento recuperado como fuente."""
-    archivo:   str
-    fragmento: str          # Primeros 200 caracteres del texto
-    pagina:    Optional[int] = None
-    score:     Optional[float] = None
+    archivo: str
+    fragmento: str
+    pagina: Optional[int] = None
+    score: Optional[float] = None
 
 
 @dataclass
 class RespuestaRAG:
-    """Respuesta completa del sistema RAG con toda la metadata."""
-    respuesta:          str
-    fuentes:            list[Fuente] = field(default_factory=list)
-    score_confianza:    float = 0.0
-    tiene_info:         bool = True
-    pregunta:           str = ""
-    modelo:             str = ""
+    respuesta: str
+    fuentes: list[Fuente] = field(default_factory=list)
+    score_confianza: float = 0.0
+    tiene_info: bool = True
+    pregunta: str = ""
+    modelo: str = ""
     requiere_derivacion: bool = False
-# ─── Configuración ───────────────────────────────────────────────────────────
 
-CHROMA_DIR      = os.getenv("CHROMA_DIR", "./chroma_db")
-COLLECTION_NAME = os.getenv("COLLECTION_NAME", "soporte_docs")
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
-LLM_MODEL       = os.getenv("LLM_MODEL", "gpt-4o-mini")
-TOP_K           = int(os.getenv("TOP_K", "4"))
-CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", "0.65"))
-# ─── Prompt del sistema ──────────────────────────────────────────────────────
-#
-# Este prompt es crítico. Define el comportamiento del asistente:
-# - Solo usa el contexto proporcionado (evita alucinaciones)
-# - Admite cuando no tiene información (activa el router después)
-# - Mantiene tono profesional y empático
-# - Cita la fuente cuando es relevante
-#
+
+# ─── Prompts ─────────────────────────────────────────────────────────────────
+
 PROMPT_SISTEMA = """Eres un asistente de soporte al cliente profesional y empático.
 Tu única fuente de información es el contexto que se te proporciona a continuación.
 
@@ -88,7 +68,7 @@ PROMPT_SCORE = """Evalúa qué tan bien responde el siguiente texto a la pregunt
 Devuelve SOLO un número decimal entre 0.0 y 1.0, sin texto adicional.
 
 0.0 = No hay información relevante / dice que no sabe
-0.5 = Información parcial o poco específica  
+0.5 = Información parcial o poco específica
 1.0 = Respuesta completa y directa
 
 Pregunta: {pregunta}
@@ -107,256 +87,220 @@ Mensaje del usuario: {pregunta}
 
 ¿Requiere ticket de seguimiento? (si/no):"""
 
-def get_llm():
-    return ChatOpenAI(
-        model=LLM_MODEL,
-        temperature=0,
-        api_key=os.getenv("OPENAI_API_KEY", "not-needed"),
-        base_url=os.getenv("OPENAI_BASE_URL") or None
-    )
+
+# ─── Cadena RAG ──────────────────────────────────────────────────────────────
 
 class RAGChain:
     """
-    Encapsula toda la lógica de la cadena RAG.
-    Se instancia una vez al arrancar la aplicación y se reutiliza.
+    Encapsula la lógica de retrieval + generación.
+
+    Recibe `Settings` por constructor (DI explícita → fácil de testear).
+    Si no se pasa, hace fallback a `get_settings()` para preservar compat.
     """
-    
-    def __init__(self):
+
+    def __init__(self, settings: Optional[Settings] = None):
+        self.settings: Settings = settings or get_settings()
         self._vectorstore: Optional[Chroma] = None
         self._llm: Optional[ChatOpenAI] = None
         self._llm_scorer: Optional[ChatOpenAI] = None
         self._embeddings = None
         self._inicializado = False
-    
+
+    def _build_llm(self) -> ChatOpenAI:
+        return ChatOpenAI(
+            model=self.settings.llm_model,
+            temperature=0,
+            api_key=self.settings.openai_api_key or "not-needed",
+            base_url=self.settings.openai_base_url or None,
+        )
+
     def inicializar(self) -> bool:
-        """
-        Carga la base vectorial y los modelos en memoria.
-        Se llama al arrancar la API, no en cada consulta.
-        
-        Returns:
-            True si la inicialización fue exitosa.
-        """
-        try:    
-            print(f"Cargando embeddings: {EMBEDDING_MODEL}")
+        """Carga embeddings, vectorstore y LLM en memoria."""
+        try:
+            logger.info("Cargando embeddings: %s", self.settings.embedding_model)
             self._embeddings = HuggingFaceEmbeddings(
-                model_name=EMBEDDING_MODEL,
+                model_name=self.settings.embedding_model,
                 model_kwargs={"device": "cpu"},
                 encode_kwargs={"normalize_embeddings": True},
             )
-            
-            print(f"Conectando a ChromaDB: {CHROMA_DIR}/{COLLECTION_NAME}")
-            self._vectorstore = Chroma(
-                collection_name=COLLECTION_NAME,
-                embedding_function=self._embeddings,
-                persist_directory=CHROMA_DIR,
+
+            logger.info(
+                "Conectando a ChromaDB: %s/%s",
+                self.settings.chroma_dir,
+                self.settings.collection_name,
             )
-            
-            # Verificar que hay documentos indexados
+            self._vectorstore = Chroma(
+                collection_name=self.settings.collection_name,
+                embedding_function=self._embeddings,
+                persist_directory=self.settings.chroma_dir,
+            )
+
             count = self._vectorstore._collection.count()
             if count == 0:
-                print("La base vectorial está vacía. Ejecuta: python ingest.py")
+                logger.warning(
+                    "La base vectorial está vacía. Ejecuta: python ingest.py"
+                )
             else:
-                print(f"Base vectorial lista: {count} fragmentos indexados")
-            
-            print(f"Cargando LLM: {LLM_MODEL}")
-            self._llm = get_llm()
-            
-            # Modelo para scoring (temperatura 0 = determinista)
-            self._llm_scorer =get_llm()
-            
+                logger.info("Base vectorial lista: %d fragmentos indexados", count)
+
+            logger.info("Cargando LLM: %s", self.settings.llm_model)
+            self._llm = self._build_llm()
+            self._llm_scorer = self._build_llm()
+
             self._inicializado = True
-            print("RAGChain inicializado correctamente")
+            logger.info("RAGChain inicializado correctamente")
             return True
-            
+
         except Exception as e:
-            print(f"Error inicializando RAGChain: {e}")
+            logger.error("Error inicializando RAGChain: %s", e)
             return False
-        
-    def _recuperar_fragmentos(self, pregunta: str) -> list[Document]:
-        """
-        Busca los TOP_K fragmentos más relevantes para la pregunta.
-        Usa similarity_search_with_score para obtener
-        también el score de similitud de cada fragmento.
-        """
+
+    def _recuperar_fragmentos(
+        self, pregunta: str
+    ) -> list[tuple[Document, float]]:
         resultados_raw = self._vectorstore.similarity_search_with_score(
             query=pregunta,
-            k=TOP_K,
+            k=self.settings.top_k,
         )
-        
-        # Convertir distancia L2 a score de similitud normalizado (0-1)
-        # Menor distancia = mayor similitud
+
+        # Nota: la conversión dist → score es aproximada.
+        # Se mejora en la deuda técnica §1.3 (cosine vs L2).
         resultados = [(doc, 1 / (1 + dist)) for doc, dist in resultados_raw]
-        
-        # Filtrar fragmentos con score muy bajo
-        # Umbral bajo porque el LLM evalúa relevancia después
-        resultados_filtrados = [(doc, score) for doc, score in resultados if score > 0.10]
-        
+        resultados_filtrados = [
+            (doc, score) for doc, score in resultados if score > 0.10
+        ]
+
         if not resultados_filtrados:
-            print(f"No se encontraron fragmentos relevantes para: '{pregunta[:50]}...'")
+            logger.info("Sin fragmentos relevantes: '%s...'", pregunta[:50])
             return []
-        
-        print(f"Recuperados {len(resultados_filtrados)} fragmentos (scores: {[round(s, 2) for _, s in resultados_filtrados]})")
+
+        logger.info(
+            "Recuperados %d fragmentos (scores: %s)",
+            len(resultados_filtrados),
+            [round(s, 2) for _, s in resultados_filtrados],
+        )
         return resultados_filtrados
-    
+
     def _calcular_score_confianza(self, pregunta: str, respuesta: str) -> float:
-        """
-        Pide al LLM que evalúe qué tan bien responde su propia respuesta.
-        Esto es self-evaluation: el modelo califica su propia calidad.
-        
-        Si el score es bajo, el router en main.py decidirá escalar a humano
-        o crear un ticket en lugar de enviar la respuesta al cliente.
-        """
-        # Atajo rápido: si la respuesta contiene la frase de "no tengo info",
-        # el score es directamente 0.0 sin llamar al LLM (ahorra tokens)
         frases_sin_info = [
             "no tengo información suficiente",
             "no tengo información sobre",
             "no encontré información",
             "no puedo responder",
         ]
-        if any(frase in respuesta.lower() for frase in frases_sin_info):
+        if any(f in respuesta.lower() for f in frases_sin_info):
             return 0.0
-        
+
         try:
             prompt = PROMPT_SCORE.format(pregunta=pregunta, respuesta=respuesta)
             resultado = self._llm_scorer.invoke(prompt)
             score = float(resultado.content.strip())
-            return max(0.0, min(1.0, score))   # Clamp entre 0 y 1
+            return max(0.0, min(1.0, score))
         except (ValueError, Exception) as e:
-            print(f"Error calculando score: {e}. Usando score neutro 0.5")
+            logger.warning("Error calculando score: %s. Usando 0.5", e)
             return 0.5
 
     def _determinar_derivacion(self, pregunta: str) -> bool:
-        """
-        Pide al LLM que clasifique si la consulta requiere abrir un ticket
-        de seguimiento (True) o puede resolverse con una respuesta directa (False).
-        La decisión se basa en la intención del mensaje, no en palabras clave.
-        """
         try:
             prompt = PROMPT_DERIVACION.format(pregunta=pregunta)
             resultado = self._llm_scorer.invoke(prompt)
             return resultado.content.strip().lower().startswith("si")
         except Exception as e:
-            print(f"Error determinando derivación: {e}. Por defecto: False")
+            logger.warning("Error determinando derivación: %s. Default False", e)
             return False
 
-    def _formatear_contexto(self, fragmentos: list[tuple[Document, float]]) -> str:
-        """
-        Convierte la lista de fragmentos recuperados en un string
-        formateado que se inyecta en el prompt.
-        
-        Incluye el nombre del archivo fuente para que el LLM pueda
-        citar de dónde viene la información.
-        """
+    def _formatear_contexto(
+        self, fragmentos: list[tuple[Document, float]]
+    ) -> str:
         if not fragmentos:
             return "No se encontró contexto relevante en la base de conocimiento."
-        
+
         partes = []
-        for i, (doc, score) in enumerate(fragmentos, 1):
+        for i, (doc, _score) in enumerate(fragmentos, 1):
             archivo = doc.metadata.get("archivo", "Documento desconocido")
-            pagina  = doc.metadata.get("page", "")
-            ref     = f"{archivo}, p.{pagina}" if pagina else archivo
-            
+            pagina = doc.metadata.get("page", "")
+            ref = f"{archivo}, p.{pagina}" if pagina else archivo
             partes.append(
                 f"[Fragmento {i} — Fuente: {ref}]\n{doc.page_content.strip()}"
             )
-        
-        return "\n\n---\n\n".join(partes)
-    
-    def consultar(self, pregunta: str, usuario_id: Optional[str] = None) -> RespuestaRAG:
-        """
-        Método principal: procesa una pregunta y devuelve una respuesta completa.
-        
-        Flujo:
-        1. Recuperar fragmentos relevantes
-        2. Formatear contexto
-        3. Llamar al LLM con el prompt ensamblado
-        4. Calcular score de confianza
-        5. Construir respuesta estructurada
-        
-        Args:
-            pregunta:   La pregunta del usuario en lenguaje natural.
-            usuario_id: ID opcional del usuario (para logs y trazabilidad).
-        
-        Returns:
-            RespuestaRAG con la respuesta, fuentes y metadata.
-        """
-        if not self._inicializado:
-            raise RuntimeError("RAGChain no está inicializado. Llama a .inicializar() primero.")
-        
-        print(f"Consulta de usuario '{usuario_id or 'anon'}': {pregunta[:60]}...")
-        
-        # ── Paso 1: Recuperar fragmentos ────────────────────────────────────
-        fragmentos_con_score = self._recuperar_fragmentos(pregunta)
-        
-        # ── Paso 2: Formatear contexto ──────────────────────────────────────
-        contexto = self._formatear_contexto(fragmentos_con_score)
-        
-        # ── Paso 3: Llamar al LLM ───────────────────────────────────────────
-        prompt = ChatPromptTemplate.from_template(PROMPT_SISTEMA)
-        chain  = prompt | self._llm | StrOutputParser()
-        
-        respuesta_texto = chain.invoke({
-            "contexto": contexto,
-            "pregunta": pregunta,
-        })
-        
-        # ── Paso 4: Calcular score de confianza ─────────────────────────────
-        score = self._calcular_score_confianza(pregunta, respuesta_texto)
-        tiene_info = score >= CONFIDENCE_THRESHOLD
 
-        # ── Paso 4b: Determinar si requiere ticket de seguimiento ────────────
-        requiere_derivacion = self._determinar_derivacion(pregunta) if tiene_info else False
-        
-        # ── Paso 5: Construir objeto de respuesta ───────────────────────────
+        return "\n\n---\n\n".join(partes)
+
+    def consultar(
+        self, pregunta: str, usuario_id: Optional[str] = None
+    ) -> RespuestaRAG:
+        if not self._inicializado:
+            raise RuntimeError(
+                "RAGChain no está inicializado. Llama a .inicializar() primero."
+            )
+
+        logger.info(
+            "Consulta de '%s': %s...", usuario_id or "anon", pregunta[:60]
+        )
+
+        fragmentos_con_score = self._recuperar_fragmentos(pregunta)
+        contexto = self._formatear_contexto(fragmentos_con_score)
+
+        prompt = ChatPromptTemplate.from_template(PROMPT_SISTEMA)
+        chain = prompt | self._llm | StrOutputParser()
+        respuesta_texto = chain.invoke(
+            {"contexto": contexto, "pregunta": pregunta}
+        )
+
+        score = self._calcular_score_confianza(pregunta, respuesta_texto)
+        tiene_info = score >= self.settings.confidence_threshold
+        requiere_derivacion = (
+            self._determinar_derivacion(pregunta) if tiene_info else False
+        )
+
         fuentes = [
             Fuente(
                 archivo=doc.metadata.get("archivo", "Desconocido"),
-                fragmento=doc.page_content[:200] + "..." if len(doc.page_content) > 200 else doc.page_content,
+                fragmento=(
+                    doc.page_content[:200] + "..."
+                    if len(doc.page_content) > 200
+                    else doc.page_content
+                ),
                 pagina=doc.metadata.get("page"),
                 score=round(s, 3),
             )
             for doc, s in fragmentos_con_score
         ]
-        
+
         respuesta = RespuestaRAG(
             respuesta=respuesta_texto,
             fuentes=fuentes,
             score_confianza=round(score, 3),
             tiene_info=tiene_info,
             pregunta=pregunta,
-            modelo=LLM_MODEL,
+            modelo=self.settings.llm_model,
             requiere_derivacion=requiere_derivacion,
         )
-        
-        print(f"Respuesta generada — Score: {score:.2f} | Tiene info: {tiene_info} | Deriva: {requiere_derivacion} | Fuentes: {len(fuentes)}")
+
+        logger.info(
+            "Respuesta — Score: %.2f | Info: %s | Deriva: %s | Fuentes: %d",
+            score,
+            tiene_info,
+            requiere_derivacion,
+            len(fuentes),
+        )
         return respuesta
-    
+
     def estadisticas(self) -> dict:
-        """Devuelve estadísticas de la base vectorial para el endpoint /health."""
         if not self._inicializado or not self._vectorstore:
             return {"estado": "no inicializado"}
-        
+
         try:
             count = self._vectorstore._collection.count()
             return {
-                "estado":       "activo",
-                "fragmentos":   count,
-                "coleccion":    COLLECTION_NAME,
-                "vectorstore":  CHROMA_DIR,
-                "modelo_llm":   LLM_MODEL,
-                "modelo_embed": EMBEDDING_MODEL,
-                "top_k":        TOP_K,
-                "threshold":    CONFIDENCE_THRESHOLD,
+                "estado": "activo",
+                "fragmentos": count,
+                "coleccion": self.settings.collection_name,
+                "vectorstore": self.settings.chroma_dir,
+                "modelo_llm": self.settings.llm_model,
+                "modelo_embed": self.settings.embedding_model,
+                "top_k": self.settings.top_k,
+                "threshold": self.settings.confidence_threshold,
             }
         except Exception as e:
             return {"estado": "error", "detalle": str(e)}
-
-
-# ─── Instancia global (singleton) ───────────────────────────────────────────
-#
-# Se crea una sola vez al importar el módulo y se comparte entre requests.
-# Esto evita recargar los modelos en cada consulta (sería muy lento).
-#
-rag = RAGChain()    
-

@@ -1,224 +1,206 @@
 """
-ingest.py — Pipeline de ingesta de documentos
+ingest.py — Pipeline de ingesta de documentos.
 
-Qué hace este archivo:
-1. Lee todos los documentos de la carpeta /docs (PDF, DOCX, TXT)
-2. Los divide en fragmentos manejables (chunking)
-3. Convierte cada fragmento en un vector numérico (embedding)
-4. Guarda todo en ChromaDB (base de datos vectorial local)
+1. Lee todos los documentos de DOCS_DIR (PDF, DOCX, TXT, MD).
+2. Los divide en chunks manejables.
+3. Convierte cada chunk en embedding (HuggingFace local — no requiere API key).
+4. Persiste en ChromaDB.
 """
-
-import shutil
-
-from dotenv import load_dotenv
-from langchain_community.document_loaders import (
-    PyPDFLoader,
-    Docx2txtLoader,
-    TextLoader,
-    DirectoryLoader,
-)
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_chroma import Chroma
-from langchain_core.documents import Document
-from pathlib import Path
-from typing import List
-import os
-import sys
 import logging
+import shutil
+import sys
+from pathlib import Path
+from typing import List, Optional
 
-load_dotenv()
+from langchain_chroma import Chroma
+from langchain_community.document_loaders import (
+    Docx2txtLoader,
+    PyPDFLoader,
+    TextLoader,
+)
+from langchain_core.documents import Document
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-# ─── Configuración desde variables de entorno ───────────────────────────────
-DOCS_DIR        = os.getenv("DOCS_DIR", "./docs")
-CHROMA_DIR      = os.getenv("CHROMA_DIR", "./chroma_db")
-COLLECTION_NAME = os.getenv("COLLECTION_NAME", "soporte_docs")
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
-CHUNK_SIZE      = int(os.getenv("CHUNK_SIZE", "400"))
-CHUNK_OVERLAP   = int(os.getenv("CHUNK_OVERLAP", "80"))
+from config import Settings, get_settings
 
-# ─── Cargadores por tipo de archivo ─────────────────────────────────────────
+logger = logging.getLogger(__name__)
+
+
 LOADERS = {
-    ".pdf":  PyPDFLoader,
+    ".pdf": PyPDFLoader,
     ".docx": Docx2txtLoader,
-    ".txt":  TextLoader,
-    ".md":   TextLoader,
+    ".txt": TextLoader,
+    ".md": TextLoader,
 }
 
+
 def cargar_documentos(docs_dir: str) -> List[Document]:
-    """
-    Lee todos los archivos de la carpeta docs/ y los convierte
-    en objetos Document de LangChain.
-    
-    Cada Document tiene:
-    - page_content: el texto del fragmento
-    - metadata: origen (nombre del archivo, página, etc.)
-    """
     docs_path = Path(docs_dir)
-    
+
     if not docs_path.exists():
-        print(f"Carpeta '{docs_dir}' no existe. Creándola...")
+        logger.warning("Carpeta '%s' no existe. Creándola...", docs_dir)
         docs_path.mkdir(parents=True)
-        print("Coloca tus archivos PDF, DOCX o TXT en la carpeta 'docs/' y vuelve a ejecutar.")
+        logger.info(
+            "Coloca tus archivos PDF, DOCX, TXT o MD en '%s' y vuelve a ejecutar.",
+            docs_dir,
+        )
         return []
-    
+
     archivos = list(docs_path.rglob("*"))
     archivos_validos = [f for f in archivos if f.suffix.lower() in LOADERS]
-    
+
     if not archivos_validos:
-        print(f"No se encontraron documentos en '{docs_dir}'.")
-        print("Formatos soportados: PDF, DOCX, TXT, MD")
+        logger.warning("No se encontraron documentos en '%s'.", docs_dir)
+        logger.info("Formatos soportados: PDF, DOCX, TXT, MD")
         return []
-    
-    print(f"Encontrados {len(archivos_validos)} archivos para ingestar:")
-    
-    todos_los_docs: List[Document] = []
-    
+
+    logger.info("Encontrados %d archivos para ingestar", len(archivos_validos))
+
+    todos: List[Document] = []
     for archivo in archivos_validos:
         try:
             loader_class = LOADERS[archivo.suffix.lower()]
             loader = loader_class(str(archivo))
             docs = loader.load()
-            
-            # Agregar metadata útil a cada documento
             for doc in docs:
                 doc.metadata["archivo"] = archivo.name
-                doc.metadata["ruta"]    = str(archivo)
-                doc.metadata["tipo"]    = archivo.suffix.lower().replace(".", "")
-            
-            todos_los_docs.extend(docs)
-            print(f"  ✓ {archivo.name} — {len(docs)} página(s)")
-            
+                doc.metadata["ruta"] = str(archivo)
+                doc.metadata["tipo"] = archivo.suffix.lower().replace(".", "")
+            todos.extend(docs)
+            logger.info("  ✓ %s — %d página(s)", archivo.name, len(docs))
         except Exception as e:
-            print(f"  ✗ Error cargando {archivo.name}: {e}")
-    
-    print(f"Total: {len(todos_los_docs)} páginas cargadas")
-    return todos_los_docs
+            logger.error("  ✗ Error cargando %s: %s", archivo.name, e)
 
-def dividir_en_fragmentos(documentos: List[Document]) -> List[Document]:
-    """
-    Divide los documentos en fragmentos pequeños (chunks).
-    """
+    logger.info("Total: %d páginas cargadas", len(todos))
+    return todos
+
+
+def dividir_en_fragmentos(
+    documentos: List[Document],
+    chunk_size: int,
+    chunk_overlap: int,
+) -> List[Document]:
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=CHUNK_SIZE,
-        chunk_overlap=CHUNK_OVERLAP,          # Solapamiento para no perder contexto en los bordes
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
         length_function=len,
-        separators=["\n\n", "\n", ". ", " ", ""],  # Prioridad de corte
+        separators=["\n\n", "\n", ". ", " ", ""],
     )
-    
     chunks = splitter.split_documents(documentos)
-    
-    # Limpiar fragmentos muy cortos (menos de 50 caracteres = ruido)
     chunks = [f for f in chunks if len(f.page_content.strip()) > 50]
-    
-    print(f"Documentos divididos en {len(chunks)} fragmentos")
-    print(f"Tamaño promedio: {sum(len(f.page_content) for f in chunks) // len(chunks) if chunks else 0} caracteres")
-    
+
+    avg = sum(len(f.page_content) for f in chunks) // len(chunks) if chunks else 0
+    logger.info(
+        "Documentos divididos en %d fragmentos (avg %d chars)", len(chunks), avg
+    )
     return chunks
 
-def get_embeddings():
+
+def get_embeddings(model_name: str) -> HuggingFaceEmbeddings:
     return HuggingFaceEmbeddings(
-        model_name=EMBEDDING_MODEL,
+        model_name=model_name,
         model_kwargs={"device": "cpu"},
-        encode_kwargs={"normalize_embeddings": True}
+        encode_kwargs={"normalize_embeddings": True},
     )
 
-def load_or_create_vectorstore(chunks):
-    """Convierte en embeddings y guarda en ChromaDB, 
-    o carga si ya existe.
-    """
-    embeddings = get_embeddings()
 
-    if Path(CHROMA_DIR).exists() and any(Path(CHROMA_DIR).iterdir()):
-        print("📂 Cargando vector store existente de ChromaDB...")
+def load_or_create_vectorstore(chunks, settings: Settings):
+    embeddings = get_embeddings(settings.embedding_model)
+    chroma_path = Path(settings.chroma_dir)
+
+    if chroma_path.exists() and any(chroma_path.iterdir()):
+        logger.info("Cargando vector store existente de ChromaDB...")
         vectorstore = Chroma(
-            persist_directory=CHROMA_DIR,
+            persist_directory=settings.chroma_dir,
             embedding_function=embeddings,
-            collection_name=COLLECTION_NAME
+            collection_name=settings.collection_name,
         )
-        print(f"✅ Vector store cargado ({vectorstore._collection.count()} chunks)")
+        logger.info(
+            "Vector store cargado (%d chunks)",
+            vectorstore._collection.count(),
+        )
     else:
-        print(f"🔢 Creando embeddings para {len(chunks)} chunks...")
+        logger.info("Creando embeddings para %d chunks...", len(chunks))
         vectorstore = Chroma.from_documents(
             documents=chunks,
             embedding=embeddings,
-            persist_directory=CHROMA_DIR,
-            collection_name=COLLECTION_NAME
+            persist_directory=settings.chroma_dir,
+            collection_name=settings.collection_name,
         )
-        print("✅ Vector store creado y guardado en ChromaDB")
+        logger.info("Vector store creado y guardado en ChromaDB")
 
     return vectorstore
 
-def limpiar_vectorstore():
-    """Elimina la base vectorial existente. Usar con precaución."""
-    chroma_path = Path(CHROMA_DIR)
+
+def limpiar_vectorstore(chroma_dir: str) -> None:
+    chroma_path = Path(chroma_dir)
     if chroma_path.exists():
         shutil.rmtree(chroma_path)
-        print(f"Base vectorial '{CHROMA_DIR}' eliminada")
+        logger.info("Base vectorial '%s' eliminada", chroma_dir)
     else:
-        print("No había base vectorial previa")
+        logger.info("No había base vectorial previa")
 
-def ejecutar_ingesta(limpiar: bool = False) -> dict:
-    """
-    Función principal del pipeline de ingesta.
-    Orquesta todos los pasos y devuelve estadísticas.  
-    Args:
-        limpiar: Si True, elimina la base vectorial existente antes de ingestar.
-                 Usar cuando actualizas documentos.
-    Returns:
-        Diccionario con estadísticas de la ingesta.
-    """
-    print("=" * 50)
-    print("INICIANDO PIPELINE DE INGESTA")
-    print("=" * 50)
-    
-    if not os.getenv("OPENAI_API_KEY"):
-        print("No se encontró OPENAI_API_KEY en las variables de entorno.")
-        print("Crea un archivo .env con: OPENAI_API_KEY=sk-proj-...")
-        sys.exit(1)
-    
+
+def ejecutar_ingesta(
+    limpiar: bool = False, settings: Optional[Settings] = None
+) -> dict:
+    """Pipeline completo. `settings` se pasa explícito en producción; fallback a get_settings()."""
+    settings = settings or get_settings()
+
+    logger.info("=" * 50)
+    logger.info("INICIANDO PIPELINE DE INGESTA")
+    logger.info("=" * 50)
+
     if limpiar:
-        print("Limpiando base vectorial existente...")
-        limpiar_vectorstore()
-    
-    # Paso 1: Cargar documentos
-    documentos = cargar_documentos(DOCS_DIR)
+        logger.info("Limpiando base vectorial existente...")
+        limpiar_vectorstore(settings.chroma_dir)
+
+    documentos = cargar_documentos(settings.docs_dir)
     if not documentos:
-        return {"exito": False, "mensaje": "No se encontraron documentos", "fragmentos": 0}
-    
-    # Paso 2: Dividir en fragmentos
-    chunks = dividir_en_fragmentos(documentos)
+        return {
+            "exito": False,
+            "mensaje": "No se encontraron documentos",
+            "fragmentos": 0,
+        }
+
+    chunks = dividir_en_fragmentos(
+        documentos, settings.chunk_size, settings.chunk_overlap
+    )
     if not chunks:
-        return {"exito": False, "mensaje": "No se generaron fragmentos", "fragmentos": 0}
-    
-    # Paso 3: Guardar en base vectorial
-    load_or_create_vectorstore(chunks)
-    
+        return {
+            "exito": False,
+            "mensaje": "No se generaron fragmentos",
+            "fragmentos": 0,
+        }
+
+    load_or_create_vectorstore(chunks, settings)
+
     stats = {
-        "exito":       True,
-        "documentos":  len(set(f.metadata.get("archivo", "") for f in chunks)),
-        "fragmentos":  len(chunks),
-        "chunk_size":  CHUNK_SIZE,
-        "chunk_overlap": CHUNK_OVERLAP,
-        "vectorstore": CHROMA_DIR,
-        "coleccion":   COLLECTION_NAME,
+        "exito": True,
+        "documentos": len(set(f.metadata.get("archivo", "") for f in chunks)),
+        "fragmentos": len(chunks),
+        "chunk_size": settings.chunk_size,
+        "chunk_overlap": settings.chunk_overlap,
+        "vectorstore": settings.chroma_dir,
+        "coleccion": settings.collection_name,
     }
-    
-    print("=" * 50)
-    print("INGESTA COMPLETADA")
-    print(f"  Documentos procesados : {stats['documentos']}")
-    print(f"  Chunks generados  : {stats['fragmentos']}")
-    print(f"  Base vectorial en     : {CHROMA_DIR}/")
-    print("=" * 50)
-    
+
+    logger.info("=" * 50)
+    logger.info("INGESTA COMPLETADA")
+    logger.info("  Documentos procesados : %d", stats["documentos"])
+    logger.info("  Chunks generados      : %d", stats["fragmentos"])
+    logger.info("  Base vectorial en     : %s/", settings.chroma_dir)
+    logger.info("=" * 50)
+
     return stats
-# ─── Ejecución directa ───────────────────────────────────────────────────────
+
 
 if __name__ == "__main__":
-    # Si pasas --limpiar como argumento, resetea la base vectorial
-    limpiar = "--limpiar" in sys.argv
-    resultado = ejecutar_ingesta(limpiar=limpiar)
-    
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    limpiar_flag = "--limpiar" in sys.argv
+    resultado = ejecutar_ingesta(limpiar=limpiar_flag)
+
     if not resultado["exito"]:
-        print(f"Ingesta fallida: {resultado['mensaje']}")
+        logger.error("Ingesta fallida: %s", resultado["mensaje"])
         sys.exit(1)
