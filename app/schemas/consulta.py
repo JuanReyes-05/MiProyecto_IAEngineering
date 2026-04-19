@@ -1,21 +1,9 @@
-"""
-schemas.py — Modelos Pydantic para request/response de la API.
-
-Separados del main para cumplir el patrón "bigger applications" de FastAPI
-y mantener `main.py` enfocado únicamente en la composición de la app.
-"""
-from enum import Enum
+"""DTOs de request/response para el endpoint /ask."""
 from typing import Optional
 
 from pydantic import BaseModel, Field
 
-
-class AccionRouter(str, Enum):
-    """Acciones posibles del agente. Al ser str+Enum, serializa a su value."""
-
-    RESPONDER = "responder"
-    DERIVAR = "derivar_ticket"
-    ESCALAR = "escalar_humano"
+from app.schemas.enums import AccionRouter
 
 
 class PreguntaRequest(BaseModel):
@@ -86,17 +74,3 @@ class PreguntaResponse(BaseModel):
             }
         }
     }
-
-
-class IngestRequest(BaseModel):
-    limpiar: bool = Field(
-        False,
-        description="Si es true, limpia la base vectorial antes de reingestar.",
-    )
-
-
-class HealthResponse(BaseModel):
-    estado: str
-    version: str
-    estadisticas: dict
-    timestamp: str

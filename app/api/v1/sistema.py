@@ -1,10 +1,9 @@
 """Endpoints de sistema: raíz e health check."""
 from datetime import datetime
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
-from dependencies import RAGDep
-from schemas import HealthResponse
+from app.schemas.sistema import HealthResponse
 
 router = APIRouter(tags=["sistema"])
 
@@ -24,8 +23,9 @@ async def raiz():
 
 
 @router.get("/health", response_model=HealthResponse)
-async def health(rag: RAGDep):
-    stats = rag.estadisticas()
+async def health(request: Request):
+    rag = getattr(request.app.state, "rag_service", None)
+    stats = rag.estadisticas() if rag else {"estado": "no inicializado"}
     estado = "ok" if stats.get("estado") == "activo" else "degradado"
     return HealthResponse(
         estado=estado,

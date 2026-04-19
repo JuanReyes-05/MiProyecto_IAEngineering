@@ -1,14 +1,6 @@
-"""
-ingest.py — Pipeline de ingesta de documentos.
-
-1. Lee todos los documentos de DOCS_DIR (PDF, DOCX, TXT, MD).
-2. Los divide en chunks manejables.
-3. Convierte cada chunk en embedding (HuggingFace local — no requiere API key).
-4. Persiste en ChromaDB.
-"""
+"""Pipeline de ingesta de documentos al vector store."""
 import logging
 import shutil
-import sys
 from pathlib import Path
 from typing import List, Optional
 
@@ -19,10 +11,10 @@ from langchain_community.document_loaders import (
     TextLoader,
 )
 from langchain_core.documents import Document
-from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-from config import Settings, get_settings
+from app.core.config import Settings, get_settings
+from app.infrastructure.embeddings_client import build_embeddings
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +53,10 @@ def cargar_documentos(docs_dir: str) -> List[Document]:
     for archivo in archivos_validos:
         try:
             loader_class = LOADERS[archivo.suffix.lower()]
-            loader = loader_class(str(archivo))
+            if loader_class is TextLoader:
+                loader = loader_class(str(archivo), encoding="utf-8", autodetect_encoding=True)
+            else:
+                loader = loader_class(str(archivo))
             docs = loader.load()
             for doc in docs:
                 doc.metadata["archivo"] = archivo.name
@@ -97,16 +92,8 @@ def dividir_en_fragmentos(
     return chunks
 
 
-def get_embeddings(model_name: str) -> HuggingFaceEmbeddings:
-    return HuggingFaceEmbeddings(
-        model_name=model_name,
-        model_kwargs={"device": "cpu"},
-        encode_kwargs={"normalize_embeddings": True},
-    )
-
-
-def load_or_create_vectorstore(chunks, settings: Settings):
-    embeddings = get_embeddings(settings.embedding_model)
+def load_or_create_vectorstore(chunks, settings: Settings) -> Chroma:
+    embeddings = build_embeddings(settings)
     chroma_path = Path(settings.chroma_dir)
 
     if chroma_path.exists() and any(chroma_path.iterdir()):
@@ -145,7 +132,6 @@ def limpiar_vectorstore(chroma_dir: str) -> None:
 def ejecutar_ingesta(
     limpiar: bool = False, settings: Optional[Settings] = None
 ) -> dict:
-    """Pipeline completo. `settings` se pasa explícito en producción; fallback a get_settings()."""
     settings = settings or get_settings()
 
     logger.info("=" * 50)
@@ -194,13 +180,3 @@ def ejecutar_ingesta(
     logger.info("=" * 50)
 
     return stats
-
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
-    limpiar_flag = "--limpiar" in sys.argv
-    resultado = ejecutar_ingesta(limpiar=limpiar_flag)
-
-    if not resultado["exito"]:
-        logger.error("Ingesta fallida: %s", resultado["mensaje"])
-        sys.exit(1)

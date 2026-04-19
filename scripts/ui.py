@@ -1,5 +1,5 @@
+"""Interfaz Streamlit para probar la API del helpdesk."""
 import os
-from datetime import datetime
 
 import requests
 import streamlit as st
@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-DEFAULT_API = os.getenv("API_URL", "http://127.0.0.1:8001")
+DEFAULT_API = os.getenv("API_URL", "http://127.0.0.1:8000")
 
 st.set_page_config(
     page_title="Soporte AI — Helpdesk RAG",

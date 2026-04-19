@@ -4,10 +4,8 @@ from datetime import datetime
 
 from fastapi import APIRouter, BackgroundTasks, Request
 
-from dependencies import SettingsDep
-from ingest import ejecutar_ingesta
-from rag_chain import RAGChain
-from schemas import IngestRequest
+from app.api.dependencies import SettingsDep, ejecutar_ingesta
+from app.schemas.admin import IngestRequest
 
 logger = logging.getLogger(__name__)
 
@@ -21,22 +19,22 @@ async def reingestar(
     http_request: Request,
     settings: SettingsDep,
 ):
-    """Re-ingesta en background. Actualiza app.state.rag al terminar."""
+    """Re-ingesta en background. Recompone el RAGService al finalizar."""
     app = http_request.app
+    rebuild_rag_service = getattr(app.state, "rebuild_rag_service", None)
 
     def _ingestar():
         resultado = ejecutar_ingesta(limpiar=request.limpiar, settings=settings)
-        if resultado.get("exito"):
-            nuevo_rag = RAGChain(settings)
-            if nuevo_rag.inicializar():
-                app.state.rag = nuevo_rag
+        if resultado.get("exito") and rebuild_rag_service is not None:
+            try:
+                rebuild_rag_service()
                 logger.info(
                     "Re-ingesta completada: %d fragmentos",
                     resultado.get("fragmentos", 0),
                 )
-            else:
+            except Exception as e:
                 logger.warning(
-                    "Ingesta OK pero falló re-inicialización del RAGChain"
+                    "Ingesta OK pero falló re-inicialización del RAGService: %s", e
                 )
 
     background_tasks.add_task(_ingestar)
