@@ -3,7 +3,7 @@ version: "3.9"
 services:
   api:
     build:
-      context: .
+      context: ./backend
       dockerfile: Dockerfile
       target: runtime
     container_name: helpdesk_api
@@ -14,7 +14,7 @@ services:
       - .env
     volumes:
       - chroma_data:/app/data/chroma_db
-      - ./docs:/app/docs:ro
+      - ./backend/docs:/app/docs:ro
       - logs_data:/app/logs
     healthcheck:
       test: ["CMD", "python", "-c",
@@ -28,12 +28,10 @@ services:
 
   ui:
     build:
-      context: .
+      context: ./frontend
       dockerfile: Dockerfile
-      target: runtime
     container_name: helpdesk_ui
     restart: unless-stopped
-    command: ["streamlit", "run", "scripts/ui.py", "--server.port=8501", "--server.address=0.0.0.0"]
     ports:
       - "8501:8501"
     environment:
